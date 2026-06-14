@@ -212,10 +212,18 @@ exports.confirmCsv = async (req, res) => {
       // Allow dropping rows
       if (row._drop === true) continue;
 
+      const parsedDate = parseDateSafe(row.date);
+
       let amount = parseFloat(row.amount);
       if (row.currency === 'USD') {
-        // If user didn't fix it, auto convert
-        amount = amount * 83;
+        // If user didn't fix it, auto convert using historical api
+        const dateStr = parsedDate ? parsedDate.toISOString().split('T')[0] : new Date().toISOString().split('T')[0];
+        const converted = await currency_converter('USD', amount, 'INR', dateStr);
+        if (converted !== null) {
+          amount = converted;
+        } else {
+          amount = amount * 83;
+        }
         row.currency = 'INR';
       }
 
@@ -224,8 +232,6 @@ exports.confirmCsv = async (req, res) => {
         amount = Math.abs(amount);
         isRefund = true;
       }
-
-      const parsedDate = parseDateSafe(row.date);
 
       const isSettlement = (!row.split_type && row.split_with && row.split_with.split(';').length === 1) || 
                            row.description.toLowerCase().includes('paid back') || 
