@@ -12,16 +12,28 @@ const parseDateSafe = (dateStr) => {
   if (!dateStr) return null;
   const parts = dateStr.split('-');
   if (parts.length === 3) {
-    if (parts[1] === '14' || (parts[0] === '04' && parts[1] === '05' && parts[2] === '2026')) {
-       return new Date(`${parts[2]}-${parts[1]}-${parts[0]}`);
+    if (parts[0].length === 4) {
+      return new Date(dateStr);
     }
     return new Date(`${parts[2]}-${parts[1]}-${parts[0]}`);
   }
-  if (dateStr.startsWith('Mar-')) {
-    const day = dateStr.split('-')[1];
-    return new Date(`2026-03-${day}`);
+  
+  const monthNames = {
+    jan: '01', feb: '02', mar: '03', apr: '04', may: '05', jun: '06',
+    jul: '07', aug: '08', sep: '09', oct: '10', nov: '11', dec: '12'
+  };
+  const lowerStr = dateStr.toLowerCase();
+  for (const [abbr, monthNum] of Object.entries(monthNames)) {
+    if (lowerStr.includes(abbr)) {
+      const dayMatch = dateStr.match(/\d+/);
+      if (dayMatch) {
+        const day = dayMatch[0].padStart(2, '0');
+        return new Date(`2026-${monthNum}-${day}`);
+      }
+    }
   }
-  return new Date(dateStr);
+  const parsed = new Date(dateStr);
+  return isNaN(parsed.getTime()) ? null : parsed;
 };
 async function currency_converter(current_currency, amount, target_currency, date) {
   const url = `https://api.freecurrencyapi.com/v1/historical?apikey=fca_live_xgwbqMQwAgClyzIVI5Xui7vKMUNwTYNtyqYcMxJ1&date=${date}&base_currency=${current_currency}&currencies=${target_currency}`;
@@ -187,27 +199,19 @@ exports.confirmCsv = async (req, res) => {
       if (allUsers[cleanName]) return allUsers[cleanName];
       let user = await User.findOne({ where: { name: cleanName } });
       if (!user) user = await User.create({ name: cleanName });
-      allUsers[cleanName] = user;
-      return user;
-    };
-
-    const memberEvents = [
-      { name: 'Aisha', join: '2026-01-01', leave: null },
-      { name: 'Rohan', join: '2026-01-01', leave: null },
-      { name: 'Priya', join: '2026-01-01', leave: null },
-      { name: 'Meera', join: '2026-01-01', leave: '2026-03-31' },
-      { name: 'Sam', join: '2026-04-15', leave: null }
-    ];
-
-    for (let m of memberEvents) {
-      const user = await getOrCreateUser(m.name);
+      
       const membership = await GroupMember.findOne({ where: { group_id: group.id, user_id: user.id } });
       if (!membership) {
          await GroupMember.create({
-           group_id: group.id, user_id: user.id, joined_at: m.join, left_at: m.leave
+           group_id: group.id,
+           user_id: user.id,
+           joined_at: '2026-01-01'
          });
       }
-    }
+      
+      allUsers[cleanName] = user;
+      return user;
+    };
 
     for (let row of cleanData) {
       // Allow dropping rows
