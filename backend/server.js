@@ -13,7 +13,8 @@ app.use(express.json());
 const upload = multer({ dest: 'uploads/' });
 
 // Routes
-app.post('/api/import', upload.single('file'), importController.importCsv);
+app.post('/api/import-analyze', upload.single('file'), importController.analyzeCsv);
+app.post('/api/import-confirm', importController.confirmCsv);
 app.get('/api/balances', expenseController.getBalances);
 app.get('/api/debts', expenseController.getSimplifiedDebts);
 app.get('/api/expenses', expenseController.getAllExpenses);
