@@ -87,10 +87,11 @@ exports.analyzeCsv = async (req, res) => {
       }
 
       // USD currency
-      if (row.currency === 'USD') {
+      // Foreign currency
+      if (row.currency && row.currency.trim() !== 'INR') {
          hasAnomaly = true;
-         issues.push("Foreign Currency (USD)");
-         requiredFixes.usd = "Convert to INR? Enter rate or manual amount.";
+         issues.push(`Foreign Currency (${row.currency})`);
+         requiredFixes.currency = "Convert to INR? Enter rate or manual amount.";
       }
 
       // Ambiguous Date
@@ -215,14 +216,21 @@ exports.confirmCsv = async (req, res) => {
       const parsedDate = parseDateSafe(row.date);
 
       let amount = parseFloat(row.amount);
-      if (row.currency === 'USD') {
-        // If user didn't fix it, auto convert using historical api
+      if (row.currency && row.currency !== 'INR') {
+        // If it's a foreign currency (USD, EUR, GBP etc.), auto convert to INR using historical api
         const dateStr = parsedDate ? parsedDate.toISOString().split('T')[0] : new Date().toISOString().split('T')[0];
-        const converted = await currency_converter('USD', amount, 'INR', dateStr);
+        const converted = await currency_converter(row.currency, amount, 'INR', dateStr);
         if (converted !== null) {
           amount = converted;
         } else {
-          amount = amount * 83;
+          // Fallback rates if API fails
+          if (row.currency === 'USD') {
+            amount = amount * 83;
+          } else if (row.currency === 'EUR') {
+            amount = amount * 90;
+          } else if (row.currency === 'GBP') {
+            amount = amount * 105;
+          }
         }
         row.currency = 'INR';
       }
