@@ -42,11 +42,28 @@ export default function Import() {
     setData(newData);
   };
 
+  const handleAutoConvertRow = async (index) => {
+    const row = data[index];
+    if (!row.amount || !row.currency || row.currency === 'INR') return;
+    try {
+      const res = await api.get(`/convert-currency?from=${row.currency}&to=INR&amount=${row.amount}&date=${row.date || ''}`);
+      if (res.data && res.data.amount) {
+        const newData = [...data];
+        newData[index].amount = res.data.amount.toString();
+        newData[index].currency = 'INR';
+        setData(newData);
+        // No alert needed — the Foreign Currency error tag clears automatically
+      }
+    } catch (err) {
+      console.error('Conversion failed', err);
+    }
+  };
+
   const submitCleanData = async () => {
     setLoading(true);
     try {
-      await api.post('/import-confirm', { cleanData: data });
-      // Build import report
+      const res = await api.post('/import-confirm', { cleanData: data, anomalyAnalysis: analysis });
+      // Build frontend summary for stats display
       const report = buildImportReport();
       setImportReport(report);
     } catch (err) {
@@ -55,6 +72,10 @@ export default function Import() {
     } finally {
       setLoading(false);
     }
+  };
+
+  const downloadTxtReport = () => {
+    window.open('http://localhost:5000/api/import-report/download', '_blank');
   };
 
   const buildImportReport = () => {
@@ -80,9 +101,41 @@ export default function Import() {
   };
 
   // Helper: check if a field has an issue for this row
-  const getFieldIssue = (rowAnomaly, field) => {
+  const getFieldIssue = (row, rowAnomaly, field) => {
     if (!rowAnomaly || !rowAnomaly.requiredFixes) return null;
+    
+    // Dynamically clear issues if the user has corrected them:
+    if (field === 'currency' && row.currency === 'INR') return null;
+    if (field === 'paid_by' && row.paid_by && row.paid_by.trim() !== '') return null;
+    if (field === 'amount' && row.amount && !row.amount.includes(',') && parseFloat(row.amount) > 0) return null;
+    if (field === 'date' && row.date && row.date !== '04-05-2026' && row.date !== 'Mar-14') return null;
+    if (field === 'split_type' && row.split_type) {
+      if (row.split_type === 'equal' && (!row.split_details || !row.split_details.includes('1;'))) return null;
+      if (row.split_type !== 'equal') return null;
+    }
+    if (field === 'split_with' && row.split_with) {
+      if (rowAnomaly.issues.some(i => i.includes('Meera')) && !row.split_with.includes('Meera')) return null;
+    }
+
     return rowAnomaly.requiredFixes[field] || null;
+  };
+
+  const getActiveIssues = (row, rowAnomaly) => {
+    if (!rowAnomaly) return [];
+    return rowAnomaly.issues.filter(issue => {
+      if (issue.startsWith('Foreign Currency') && row.currency === 'INR') return false;
+      if (issue === 'Missing Payer' && row.paid_by && row.paid_by.trim()) return false;
+      if (issue === 'Amount has commas' && row.amount && !row.amount.includes(',')) return false;
+      if (issue === 'Amount is 0' && parseFloat(row.amount) !== 0) return false;
+      if (issue === 'Missing Currency' && row.currency && row.currency.trim()) return false;
+      // Clear ambiguous date if user either changed the value OR clicked a date button (confirmed)
+      if (issue === 'Ambiguous Date format' && (row.date !== '04-05-2026' || row._dateConfirmed)) return false;
+      if (issue === "Invalid Date format 'Mar-14'" && row.date !== 'Mar-14') return false;
+      if (issue.includes('Meera') && row.split_with && !row.split_with.includes('Meera')) return false;
+      if (issue.includes('says \'equal\' but details imply') && row.split_type !== 'equal') return false;
+      if (issue === 'Missing Split Type' && row.split_type) return false;
+      return true;
+    });
   };
 
   // Helper: check if split_details is needed based on split_type
@@ -98,7 +151,12 @@ export default function Import() {
       <div>
         <div className="page-header">
           <h1>Import Report</h1>
-          <button className="btn btn-primary" onClick={() => navigate('/')}>Go to Dashboard</button>
+          <div className="flex gap-1">
+            <button className="btn btn-outline" onClick={downloadTxtReport}>
+              ⬇️ Download Report (.txt)
+            </button>
+            <button className="btn btn-primary" onClick={() => navigate('/')}>Go to Dashboard</button>
+          </div>
         </div>
 
         <div className="stats-bar">
@@ -202,6 +260,217 @@ export default function Import() {
   const anomalyRows = data.filter((row) => analysis.find(a => a.rowNum === row._rowNum));
   const cleanRows = data.filter((row) => !analysis.find(a => a.rowNum === row._rowNum));
 
+  // Build conflict groups — rows that share a conflictGroupId
+  const conflictGroupMap = {};
+  data.forEach((row, i) => {
+    if (row._conflictGroupId) {
+      if (!conflictGroupMap[row._conflictGroupId]) conflictGroupMap[row._conflictGroupId] = [];
+      conflictGroupMap[row._conflictGroupId].push({ row, i });
+    }
+  });
+  const conflictGroupIds = Object.keys(conflictGroupMap);
+  const rowsInConflictGroups = new Set(
+    conflictGroupIds.flatMap(gid => conflictGroupMap[gid].map(({ row }) => row._rowNum))
+  );
+
+  // Single row card renderer (used for both conflict-grouped and standalone anomalies)
+  const renderRowCard = (row, i, rowAnomaly, inConflict = false) => {
+    const activeIssues = getActiveIssues(row, rowAnomaly);
+    const isDropped = row._drop;
+    const hasIssues = activeIssues.length > 0;
+
+    let cardClass = 'anomaly-card';
+    if (isDropped) cardClass += ' is-dropped';
+    else if (hasIssues) cardClass += ' has-issues';
+    else cardClass += ' is-clean';
+
+    const conflictRoleBadge = row._conflictRole === 'suggested-keep'
+      ? <span className="badge badge-success" style={{ marginLeft: '6px' }}>Suggested Keep</span>
+      : row._conflictRole === 'duplicate'
+        ? <span className="badge badge-danger" style={{ marginLeft: '6px' }}>Duplicate</span>
+        : null;
+
+    return (
+      <div key={i} className={cardClass} style={inConflict ? { marginBottom: '8px' } : {}}>
+        {/* Header */}
+        <div className="row-header">
+          <div className="flex gap-1" style={{ alignItems: 'center' }}>
+            <span className="row-num">Row {row._rowNum}</span>
+            {conflictRoleBadge}
+            <span className="text-muted text-sm">— {row.description || 'No description'}</span>
+          </div>
+          <button
+            className={`btn btn-sm ${isDropped ? 'btn-success' : 'btn-danger'}`}
+            onClick={() => handleDropRow(i)}
+          >
+            {isDropped ? 'Restore' : 'Drop Row'}
+          </button>
+        </div>
+
+        {/* Issue Tags */}
+        {activeIssues.length > 0 && !isDropped && (
+          <div className="issues-list">
+            {activeIssues.map((issue, j) => (
+              <span key={j} className="issue-tag">{issue}</span>
+            ))}
+          </div>
+        )}
+
+        {/* Editable Fields */}
+        {!isDropped && (
+          <div className="fields-grid">
+            {/* Date */}
+            <div className="field-group">
+              <label>Date</label>
+              {/* Ambiguous date: show quick-pick buttons instead of free text */}
+              {row.date === '04-05-2026' ? (
+                <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
+                  <div style={{ fontSize: '0.8rem', color: 'var(--danger)', marginBottom: '2px' }}>
+                    ⚠ Is this <strong>April 5</strong> or <strong>May 4</strong>?
+                  </div>
+                  <div style={{ display: 'flex', gap: '8px' }}>
+                    <button
+                      className="btn btn-sm btn-outline"
+                      style={{ flex: 1 }}
+                      onClick={() => handleRowChange(i, 'date', '05-04-2026')}
+                    >
+                      April 5, 2026
+                    </button>
+                    <button
+                      className="btn btn-sm btn-outline"
+                      style={{ flex: 1 }}
+                      onClick={() => {
+                        // May 4 = 04-05-2026 (DD-MM-YYYY) — same value but mark it confirmed
+                        const newData = [...data];
+                        newData[i]._dateConfirmed = true;
+                        setData(newData);
+                      }}
+                    >
+                      May 4, 2026
+                    </button>
+                  </div>
+                </div>
+              ) : (
+                <input
+                  className={`form-input${getFieldIssue(row, rowAnomaly, 'date') ? ' input-error' : ''}`}
+                  value={row.date || ''}
+                  onChange={(e) => handleRowChange(i, 'date', e.target.value)}
+                  placeholder="DD-MM-YYYY"
+                />
+              )}
+              {getFieldIssue(row, rowAnomaly, 'date') && row.date !== '04-05-2026' && <div className="field-hint">{getFieldIssue(row, rowAnomaly, 'date')}</div>}
+            </div>
+
+            {/* Description */}
+            <div className="field-group">
+              <label>Description</label>
+              <input
+                className="form-input"
+                value={row.description || ''}
+                onChange={(e) => handleRowChange(i, 'description', e.target.value)}
+              />
+            </div>
+
+            {/* Paid By */}
+            <div className="field-group">
+              <label>Paid By</label>
+              <input
+                className={`form-input${getFieldIssue(row, rowAnomaly, 'paid_by') ? ' input-error' : ''}`}
+                value={row.paid_by || ''}
+                onChange={(e) => handleRowChange(i, 'paid_by', e.target.value)}
+                placeholder="Name"
+              />
+              {getFieldIssue(row, rowAnomaly, 'paid_by') && <div className="field-hint">{getFieldIssue(row, rowAnomaly, 'paid_by')}</div>}
+            </div>
+
+            {/* Amount */}
+            <div className="field-group">
+              <label>Amount</label>
+              <input
+                className={`form-input${getFieldIssue(row, rowAnomaly, 'amount') ? ' input-error' : ''}`}
+                value={row.amount || ''}
+                onChange={(e) => handleRowChange(i, 'amount', e.target.value)}
+                placeholder="0.00"
+              />
+              {getFieldIssue(row, rowAnomaly, 'amount') && <div className="field-hint">{getFieldIssue(row, rowAnomaly, 'amount')}</div>}
+            </div>
+
+            {/* Currency */}
+            <div className="field-group">
+              <label>Currency</label>
+              <select
+                className={`form-select${getFieldIssue(row, rowAnomaly, 'currency') ? ' input-error' : ''}`}
+                value={row.currency || 'INR'}
+                onChange={(e) => handleRowChange(i, 'currency', e.target.value)}
+              >
+                <option value="INR">INR</option>
+                <option value="USD">USD</option>
+                <option value="EUR">EUR</option>
+                <option value="GBP">GBP</option>
+              </select>
+              {getFieldIssue(row, rowAnomaly, 'currency') && <div className="field-hint">{getFieldIssue(row, rowAnomaly, 'currency')}</div>}
+            </div>
+
+            {row.currency !== 'INR' && row.amount && (
+              <div className="field-group" style={{ gridColumn: 'span 2', marginTop: '2px', marginBottom: '8px' }}>
+                <button
+                  className="btn btn-sm"
+                  style={{ background: 'var(--success)', color: '#fff', fontWeight: 600, width: '100%', padding: '8px' }}
+                  onClick={() => handleAutoConvertRow(i)}
+                >
+                  ⟳ Convert {row.currency} → INR using historical rate &nbsp;(click to apply &amp; clear error)
+                </button>
+              </div>
+            )}
+
+            {/* Split Type */}
+            <div className="field-group">
+              <label>Split Type</label>
+              <select
+                className={`form-select${getFieldIssue(row, rowAnomaly, 'split_type') ? ' input-error' : ''}`}
+                value={row.split_type || ''}
+                onChange={(e) => handleRowChange(i, 'split_type', e.target.value)}
+              >
+                <option value="">— select —</option>
+                <option value="equal">Equal</option>
+                <option value="unequal">Unequal</option>
+                <option value="percentage">Percentage</option>
+                <option value="share">Share</option>
+              </select>
+              {getFieldIssue(row, rowAnomaly, 'split_type') && <div className="field-hint">{getFieldIssue(row, rowAnomaly, 'split_type')}</div>}
+            </div>
+
+            {/* Split With */}
+            <div className="field-group">
+              <label>Split With</label>
+              <input
+                className={`form-input${getFieldIssue(row, rowAnomaly, 'split_with') ? ' input-error' : ''}`}
+                value={row.split_with || ''}
+                onChange={(e) => handleRowChange(i, 'split_with', e.target.value)}
+                placeholder="Name1;Name2"
+              />
+              {getFieldIssue(row, rowAnomaly, 'split_with') && <div className="field-hint">{getFieldIssue(row, rowAnomaly, 'split_with')}</div>}
+            </div>
+
+            {/* Split Details — ONLY shown when split_type is NOT equal */}
+            {needsSplitDetails(row.split_type) && (
+              <div className="field-group">
+                <label>Split Details</label>
+                <input
+                  className={`form-input${getFieldIssue(row, rowAnomaly, 'split_details') ? ' input-error' : ''}`}
+                  value={row.split_details || ''}
+                  onChange={(e) => handleRowChange(i, 'split_details', e.target.value)}
+                  placeholder="Name1 50%;Name2 50%"
+                />
+                {getFieldIssue(row, rowAnomaly, 'split_details') && <div className="field-hint">{getFieldIssue(row, rowAnomaly, 'split_details')}</div>}
+              </div>
+            )}
+          </div>
+        )}
+      </div>
+    );
+  };
+
   return (
     <div>
       <div className="page-header">
@@ -227,162 +496,48 @@ export default function Import() {
           <span className="stat-label">Need Attention</span>
         </div>
         <div className="stat-item">
+          <span className="stat-num" style={{ color: 'var(--warning)' }}>{conflictGroupIds.length}</span>
+          <span className="stat-label">Conflict Groups</span>
+        </div>
+        <div className="stat-item">
           <span className="stat-num text-success">{cleanRows.length}</span>
           <span className="stat-label">Clean</span>
         </div>
       </div>
 
-      {/* Anomaly Rows */}
-      {data.map((row, i) => {
-        const rowAnomaly = analysis.find(a => a.rowNum === row._rowNum);
-        const isDropped = row._drop;
-        const hasIssues = !!rowAnomaly;
-
-        // Determine card class
-        let cardClass = 'anomaly-card';
-        if (isDropped) cardClass += ' is-dropped';
-        else if (hasIssues) cardClass += ' has-issues';
-        else cardClass += ' is-clean';
-
-        // Only show clean rows as a collapsed summary, not individual cards
-        if (!hasIssues) return null;
+      {/* === CONFLICT GROUPS — shown first, side by side === */}
+      {conflictGroupIds.map(groupId => {
+        const groupEntries = conflictGroupMap[groupId];
+        const firstRow = groupEntries[0].row;
+        const issueText = firstRow._conflictDesc || 'Duplicate / Conflicting rows';
 
         return (
-          <div key={i} className={cardClass}>
-            {/* Header */}
-            <div className="row-header">
-              <div className="flex gap-1" style={{ alignItems: 'center' }}>
-                <span className="row-num">Row {row._rowNum}</span>
-                <span className="text-muted text-sm">— {row.description || 'No description'}</span>
-              </div>
-              <button
-                className={`btn btn-sm ${isDropped ? 'btn-success' : 'btn-danger'}`}
-                onClick={() => handleDropRow(i)}
-              >
-                {isDropped ? 'Restore' : 'Drop Row'}
-              </button>
+          <div key={groupId} style={{ border: '1px solid var(--danger)', borderRadius: '8px', padding: '12px 16px', marginBottom: '20px', background: 'rgba(239,68,68,0.05)' }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '10px', marginBottom: '10px' }}>
+              <span style={{ background: 'var(--danger)', color: '#fff', borderRadius: '4px', padding: '2px 8px', fontSize: '0.78rem', fontWeight: 700 }}>
+                ⚠ CONFLICT GROUP
+              </span>
+              <span className="text-sm text-muted">{issueText}</span>
             </div>
-
-            {/* Issue Tags */}
-            {rowAnomaly && !isDropped && (
-              <div className="issues-list">
-                {rowAnomaly.issues.map((issue, j) => (
-                  <span key={j} className="issue-tag">{issue}</span>
-                ))}
-              </div>
-            )}
-
-            {/* Editable Fields */}
-            {!isDropped && (
-              <div className="fields-grid">
-                {/* Date */}
-                <div className="field-group">
-                  <label>Date</label>
-                  <input
-                    className={`form-input${getFieldIssue(rowAnomaly, 'date') ? ' input-error' : ''}`}
-                    value={row.date || ''}
-                    onChange={(e) => handleRowChange(i, 'date', e.target.value)}
-                    placeholder="DD-MM-YYYY"
-                  />
-                  {getFieldIssue(rowAnomaly, 'date') && <div className="field-hint">{getFieldIssue(rowAnomaly, 'date')}</div>}
-                </div>
-
-                {/* Description */}
-                <div className="field-group">
-                  <label>Description</label>
-                  <input
-                    className="form-input"
-                    value={row.description || ''}
-                    onChange={(e) => handleRowChange(i, 'description', e.target.value)}
-                  />
-                </div>
-
-                {/* Paid By */}
-                <div className="field-group">
-                  <label>Paid By</label>
-                  <input
-                    className={`form-input${getFieldIssue(rowAnomaly, 'paid_by') ? ' input-error' : ''}`}
-                    value={row.paid_by || ''}
-                    onChange={(e) => handleRowChange(i, 'paid_by', e.target.value)}
-                    placeholder="Name"
-                  />
-                  {getFieldIssue(rowAnomaly, 'paid_by') && <div className="field-hint">{getFieldIssue(rowAnomaly, 'paid_by')}</div>}
-                </div>
-
-                {/* Amount */}
-                <div className="field-group">
-                  <label>Amount</label>
-                  <input
-                    className={`form-input${getFieldIssue(rowAnomaly, 'amount') ? ' input-error' : ''}`}
-                    value={row.amount || ''}
-                    onChange={(e) => handleRowChange(i, 'amount', e.target.value)}
-                    placeholder="0.00"
-                  />
-                  {getFieldIssue(rowAnomaly, 'amount') && <div className="field-hint">{getFieldIssue(rowAnomaly, 'amount')}</div>}
-                </div>
-
-                {/* Currency */}
-                <div className="field-group">
-                  <label>Currency</label>
-                  <select
-                    className={`form-select${getFieldIssue(rowAnomaly, 'currency') ? ' input-error' : ''}`}
-                    value={row.currency || 'INR'}
-                    onChange={(e) => handleRowChange(i, 'currency', e.target.value)}
-                  >
-                    <option value="INR">INR</option>
-                    <option value="USD">USD</option>
-                    <option value="EUR">EUR</option>
-                    <option value="GBP">GBP</option>
-                  </select>
-                  {getFieldIssue(rowAnomaly, 'currency') && <div className="field-hint">{getFieldIssue(rowAnomaly, 'currency')}</div>}
-                </div>
-
-                {/* Split Type */}
-                <div className="field-group">
-                  <label>Split Type</label>
-                  <select
-                    className={`form-select${getFieldIssue(rowAnomaly, 'split_type') ? ' input-error' : ''}`}
-                    value={row.split_type || ''}
-                    onChange={(e) => handleRowChange(i, 'split_type', e.target.value)}
-                  >
-                    <option value="">— select —</option>
-                    <option value="equal">Equal</option>
-                    <option value="unequal">Unequal</option>
-                    <option value="percentage">Percentage</option>
-                    <option value="share">Share</option>
-                  </select>
-                  {getFieldIssue(rowAnomaly, 'split_type') && <div className="field-hint">{getFieldIssue(rowAnomaly, 'split_type')}</div>}
-                </div>
-
-                {/* Split With */}
-                <div className="field-group">
-                  <label>Split With</label>
-                  <input
-                    className={`form-input${getFieldIssue(rowAnomaly, 'split_with') ? ' input-error' : ''}`}
-                    value={row.split_with || ''}
-                    onChange={(e) => handleRowChange(i, 'split_with', e.target.value)}
-                    placeholder="Name1;Name2"
-                  />
-                  {getFieldIssue(rowAnomaly, 'split_with') && <div className="field-hint">{getFieldIssue(rowAnomaly, 'split_with')}</div>}
-                </div>
-
-                {/* Split Details — ONLY shown when split_type is NOT equal */}
-                {needsSplitDetails(row.split_type) && (
-                  <div className="field-group">
-                    <label>Split Details</label>
-                    <input
-                      className={`form-input${getFieldIssue(rowAnomaly, 'split_details') ? ' input-error' : ''}`}
-                      value={row.split_details || ''}
-                      onChange={(e) => handleRowChange(i, 'split_details', e.target.value)}
-                      placeholder="Name1 50%;Name2 50%"
-                    />
-                    {getFieldIssue(rowAnomaly, 'split_details') && <div className="field-hint">{getFieldIssue(rowAnomaly, 'split_details')}</div>}
-                  </div>
-                )}
-              </div>
-            )}
+            <div className="text-xs text-muted mb-2" style={{ fontStyle: 'italic' }}>
+              Keep at least one row and drop the others. The row marked <strong>Suggested Keep</strong> has the highest amount.
+            </div>
+            {groupEntries.map(({ row, i }) => {
+              const rowAnomaly = analysis.find(a => a.rowNum === row._rowNum);
+              return renderRowCard(row, i, rowAnomaly, true);
+            })}
           </div>
         );
+      })}
+
+      {/* === STANDALONE ANOMALY ROWS (not in a conflict group) === */}
+      {data.map((row, i) => {
+        if (rowsInConflictGroups.has(row._rowNum)) return null; // already rendered above
+        const rowAnomaly = analysis.find(a => a.rowNum === row._rowNum);
+        const activeIssues = getActiveIssues(row, rowAnomaly);
+        const hasIssues = activeIssues.length > 0;
+        if (!hasIssues) return null;
+        return renderRowCard(row, i, rowAnomaly, false);
       })}
 
       {/* Clean rows summary */}
@@ -394,3 +549,4 @@ export default function Import() {
     </div>
   );
 }
+

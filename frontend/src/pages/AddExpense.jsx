@@ -18,6 +18,29 @@ export default function AddExpense() {
     date: new Date().toISOString().split('T')[0]
   });
   const [loading, setLoading] = useState(false);
+  const [autoConvert, setAutoConvert] = useState(false);
+
+  const handleAutoConvertChange = async (e) => {
+    const checked = e.target.checked;
+    setAutoConvert(checked);
+    if (checked && form.amount && form.currency !== 'INR') {
+      try {
+        const res = await api.get(`/convert-currency?from=${form.currency}&to=INR&amount=${form.amount}&date=${form.date}`);
+        if (res.data && res.data.amount) {
+          setForm(prev => ({
+            ...prev,
+            amount: res.data.amount.toString(),
+            currency: 'INR'
+          }));
+          setAutoConvert(false);
+          alert(`Converted to INR: ₹${res.data.amount}`);
+        }
+      } catch (err) {
+        alert('Currency conversion failed');
+        setAutoConvert(false);
+      }
+    }
+  };
 
   useEffect(() => {
     api.get('/users').then(res => setUsers(res.data)).catch(() => {});
@@ -68,7 +91,7 @@ export default function AddExpense() {
               </div>
               <div className="form-group">
                 <label>Currency</label>
-                <select className="form-select" value={form.currency} onChange={e => handleChange('currency', e.target.value)}>
+                <select className="form-select" value={form.currency} onChange={e => { handleChange('currency', e.target.value); setAutoConvert(false); }}>
                   <option value="INR">INR (₹)</option>
                   <option value="USD">USD ($)</option>
                   <option value="EUR">EUR (€)</option>
@@ -76,6 +99,20 @@ export default function AddExpense() {
                 </select>
               </div>
             </div>
+
+            {form.currency !== 'INR' && form.amount && (
+              <div className="form-group" style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '15px' }}>
+                <input 
+                  type="checkbox" 
+                  id="auto-convert"
+                  checked={autoConvert} 
+                  onChange={handleAutoConvertChange}
+                />
+                <label htmlFor="auto-convert" style={{ margin: 0, cursor: 'pointer', fontSize: '0.9rem' }}>
+                  Convert automatically to INR (uses historical rates)
+                </label>
+              </div>
+            )}
 
             <div className="grid-2">
               <div className="form-group">

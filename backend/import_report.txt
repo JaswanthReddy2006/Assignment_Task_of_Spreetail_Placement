@@ -1,0 +1,129 @@
+============================================================
+  FAIRSHARE — IMPORT REPORT
+  Generated: 15/6/2026, 5:43:20 am
+============================================================
+
+SUMMARY
+------------------------------------------------------------
+Total Rows Submitted : 42
+Rows Imported        : 37
+Rows Dropped         : 4
+Settlements Detected : 1
+Currency Conversions : 0
+Anomalies Detected   : 19
+
+ANOMALY TYPES DETECTED
+------------------------------------------------------------
+  [1 row]  Amount has commas
+  [1 row]  Missing Payer
+  [1 row]  Missing Split Type
+  [2 rows]  Percentages not summing to 100%
+  [4 rows]  Foreign Currency
+  [1 row]  Kabir is an unregistered guest.
+  [1 row]  Invalid Date format 'Mar-14'
+  [1 row]  Missing Currency
+  [6 rows]  Conflicting Amounts (Duplicate)
+  [1 row]  Amount is 0
+  [1 row]  Ambiguous Date format
+  [1 row]  Meera moved out in March, but is included in this later expense.
+  [1 row]  Split type says 'equal' but details imply 'share'.
+
+CONFLICT GROUPS (DUPLICATE / CONFLICTING ROWS)
+------------------------------------------------------------
+These rows shared the same description and were grouped for review.
+The system recommended keeping the row with the highest amount.
+
+  Group: CONFLICT-2
+    [ROW 28] ★ RECOMMENDED KEEP (highest amount) | "Groceries DMart" | INR 2105.00 | User decision: KEPT
+    [ROW 11]   duplicate | "Groceries DMart" | INR 1875.00 | User decision: DROPPED
+    [ROW 41]   duplicate | "Groceries DMart" | INR 1990.00 | User decision: DROPPED
+
+  Group: CONFLICT-1
+    [ROW 36]   duplicate | "Groceries BigBasket" | INR 2640.00 | User decision: DROPPED
+    [ROW 3]   duplicate | "Groceries BigBasket" | INR 2340.00 | User decision: DROPPED
+    [ROW 17] ★ RECOMMENDED KEEP (highest amount) | "Groceries BigBasket" | INR 2810.00 | User decision: KEPT
+
+ROW-BY-ROW ACTION LOG (ANOMALOUS ROWS ONLY)
+------------------------------------------------------------
+[ROW 3] DROPPED    | "Groceries BigBasket" [Conflict group: conflict-1, role: duplicate]
+               Issue: Conflicting amounts for same description (2340 vs 2810 vs 2640)
+               Resolution: User chose to drop this row.
+
+[ROW 7] FIXED & IMPORTED | "Electricity Feb"
+               Anomaly: Amount has commas
+               Resolution: Commas auto-removed from amount.
+
+[ROW 11] DROPPED    | "Groceries DMart" [Conflict group: conflict-2, role: duplicate]
+               Issue: Conflicting amounts for same description (1875 vs 2105 vs 1990)
+               Resolution: User chose to drop this row.
+
+[ROW 13] FIXED & IMPORTED | "House cleaning supplies"
+               Anomaly: Missing Payer
+               Resolution: Payer filled in as "a" by user.
+
+[ROW 14] FIXED & IMPORTED | "Rohan paid Aisha back"
+               Anomaly: Missing Split Type
+
+[ROW 15] FIXED & IMPORTED | "Pizza Friday"
+               Anomaly: Percentages sum to 110% instead of 100%.
+               Resolution: Split percentages corrected by user and auto-normalised to 100%.
+
+[ROW 17] FIXED & IMPORTED | "Groceries BigBasket" [CONFLICT-1, role: suggested-keep]
+               Anomaly: Conflicting amounts for same description (2340 vs 2810 vs 2640)
+               Resolution: User kept this row as the authoritative record.
+
+[ROW 20] FIXED & IMPORTED | "Goa villa booking"
+               Anomaly: Foreign Currency (USD)
+               Resolution: Currency converted — INR 49545.01 => INR 49545.01 (fallback rate)
+
+[ROW 21] FIXED & IMPORTED | "Beach shack lunch"
+               Anomaly: Foreign Currency (USD)
+               Resolution: Currency converted — INR 7732.12 => INR 7732.12 (fallback rate)
+
+[ROW 23] FIXED & IMPORTED | "Parasailing"
+               Anomaly: Foreign Currency (USD)
+               Anomaly: Kabir is an unregistered guest.
+               Resolution: Currency converted — INR 13834.08 => INR 13834.08 (fallback rate)
+               Resolution: Kabir removed from split_with by user.
+
+[ROW 26] FIXED & IMPORTED | "Parasailing refund"
+               Anomaly: Foreign Currency (USD)
+               Resolution: Currency converted — INR -2771.52 => INR 2771.52 (fallback rate)
+
+[ROW 27] FIXED & IMPORTED | "Airport cab"
+               Anomaly: Invalid Date format 'Mar-14'
+               Resolution: Date corrected to "14-03-2026" by user.
+
+[ROW 28] FIXED & IMPORTED | "Groceries DMart" [CONFLICT-2, role: suggested-keep]
+               Anomaly: Missing Currency
+               Anomaly: Conflicting amounts for same description (1875 vs 2105 vs 1990)
+               Resolution: User kept this row as the authoritative record.
+
+[ROW 31] FIXED & IMPORTED | "Dinner order Swiggy"
+               Anomaly: Amount is 0
+
+[ROW 32] FIXED & IMPORTED | "Weekend brunch"
+               Anomaly: Percentages sum to 110% instead of 100%.
+               Resolution: Split percentages corrected by user and auto-normalised to 100%.
+
+[ROW 34] FIXED & IMPORTED | "Deep cleaning service"
+               Anomaly: Ambiguous Date format
+               Resolution: Date corrected to "04-05-2026" by user.
+
+[ROW 36] DROPPED    | "Groceries BigBasket" [Conflict group: conflict-1, role: duplicate]
+               Issue: Meera moved out in March, but is included in this later expense.
+               Issue: Conflicting amounts for same description (2340 vs 2810 vs 2640)
+               Resolution: User chose to drop this row.
+
+[ROW 38] SETTLEMENT | "Sam deposit share" — Sam paid Aisha INR 15000.00. Routed to settlements table.
+[ROW 41] DROPPED    | "Groceries DMart" [Conflict group: conflict-2, role: duplicate]
+               Issue: Conflicting amounts for same description (1875 vs 2105 vs 1990)
+               Resolution: User chose to drop this row.
+
+[ROW 42] FIXED & IMPORTED | "Furniture for common room"
+               Anomaly: Split type says 'equal' but details imply 'share'.
+
+
+============================================================
+  END OF REPORT
+============================================================

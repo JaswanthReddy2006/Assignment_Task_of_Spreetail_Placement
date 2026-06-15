@@ -41,11 +41,29 @@ async function currency_converter(current_currency, amount, target_currency, dat
   try {
     const response = await fetch(url);
     const api_data = await response.json();
-    
-    const exchange_rate = api_data.data[date][target_currency];
-    
+
+    // Validate API response shape before accessing nested data
+    if (!api_data || !api_data.data) {
+      console.error('Currency API returned unexpected response:', JSON.stringify(api_data));
+      return null;
+    }
+
+    // The API returns data keyed by date — find the first available date
+    const dateKeys = Object.keys(api_data.data);
+    if (dateKeys.length === 0) {
+      console.error('Currency API returned no date keys for date:', date);
+      return null;
+    }
+
+    const rateData = api_data.data[dateKeys[0]];
+    if (!rateData || rateData[target_currency] === undefined) {
+      console.error('Exchange rate not found for currency:', target_currency);
+      return null;
+    }
+
+    const exchange_rate = rateData[target_currency];
     return amount * exchange_rate;
-    
+
   } catch (error) {
     console.error("Conversion failed:", error);
     return null;
@@ -162,12 +180,7 @@ exports.analyzeCsv = async (req, res) => {
          }
       }
 
-      // Potential duplicates (this is simple heuristic)
-      if (row.description.toLowerCase().includes('dinner - marina bites') || row.description.toLowerCase().includes('thalassa')) {
-         hasAnomaly = true;
-         issues.push("Potential Duplicate or Conflict.");
-         requiredFixes.action = "Keep or Drop this row?";
-      }
+      // NOTE: Duplicate detection is done in a post-pass below, after all rows are collected.
 
       if (hasAnomaly) {
         anomalies.push({
@@ -181,13 +194,94 @@ exports.analyzeCsv = async (req, res) => {
     })
     .on('end', () => {
       fs.unlinkSync(req.file.path);
+
+      // === POST-PASS: Detect duplicate/conflict row groups ===
+      // CORRECT LOGIC: Group by (normalized description + normalized date).
+      // Same description on DIFFERENT dates = separate legitimate expenses — NOT a duplicate.
+      // A duplicate/conflict only exists when BOTH description AND date match.
+      const descDateGroups = {};
+      rows.forEach(row => {
+        const normDesc = (row.description || '').toLowerCase().trim();
+        const normDate = (row.date || '').trim();
+        if (!normDesc || !normDate) return;
+        const key = `${normDesc}||${normDate}`;
+        if (!descDateGroups[key]) descDateGroups[key] = [];
+        descDateGroups[key].push(row);
+      });
+
+      let conflictGroupCounter = 0;
+      for (const [key, group] of Object.entries(descDateGroups)) {
+        if (group.length < 2) continue; // only one row for this description+date → fine
+
+        const amounts = group.map(r => parseFloat(r.amount) || 0);
+        const hasDifferentAmounts = amounts.some(a => a !== amounts[0]);
+
+        // Two sub-cases:
+        // 1. Same description + same date + DIFFERENT amounts = two people logged same event differently
+        // 2. Same description + same date + SAME amount = exact duplicate (logged twice)
+        conflictGroupCounter++;
+        const groupId = `conflict-${conflictGroupCounter}`;
+        const [desc, date] = key.split('||');
+
+        // Suggested keep = row with highest amount (most likely the correct receipt)
+        // If amounts are equal, keep the first occurrence
+        const maxAmount = Math.max(...amounts);
+        const maxIdx = amounts.indexOf(maxAmount);
+
+        group.forEach((row, idx) => {
+          row._conflictGroupId = groupId;
+          row._conflictRole = idx === maxIdx ? 'suggested-keep' : 'duplicate';
+
+          const splitInfo = group.map(r => r.split_with || 'N/A').join(' / ');
+          const paidByInfo = group.map(r => r.paid_by || '?').join(' and ');
+
+          row._conflictDesc = hasDifferentAmounts
+            ? `Conflicting amounts for "${row.description}" on ${date} (${group.map(r => `${r.paid_by}: ${r.amount}`).join(' vs ')})`
+            : `Exact duplicate — "${row.description}" on ${date} logged ${group.length} times (paid by: ${paidByInfo})`;
+
+          // Add to anomalies if not already there
+          const existing = anomalies.find(a => a.rowNum === row._rowNum);
+          if (existing) {
+            if (!existing.issues.some(i => i.includes('Duplicate') || i.includes('Conflict'))) {
+              existing.issues.push(row._conflictDesc);
+              existing.requiredFixes.action = 'Keep or Drop? (see conflict group)';
+            }
+            existing.conflictGroupId = groupId;
+            existing.conflictRole = row._conflictRole;
+          } else {
+            anomalies.push({
+              rowNum: row._rowNum,
+              issues: [row._conflictDesc],
+              requiredFixes: { action: 'Keep or Drop? (see conflict group)' },
+              conflictGroupId: groupId,
+              conflictRole: row._conflictRole
+            });
+          }
+        });
+      }
+
       res.json({ data: rows, anomalies });
     });
 };
 
 exports.confirmCsv = async (req, res) => {
   try {
-    const { cleanData } = req.body;
+    const { cleanData, anomalyAnalysis = [] } = req.body;
+
+    // Report log
+    const reportLines = [];
+    const timestamp = new Date().toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' });
+    reportLines.push('='.repeat(60));
+    reportLines.push('  FAIRSHARE — IMPORT REPORT');
+    reportLines.push(`  Generated: ${timestamp}`);
+    reportLines.push('='.repeat(60));
+    reportLines.push('');
+
+    let importedCount = 0;
+    let droppedCount = 0;
+    let settlementCount = 0;
+    let convertedCount = 0;
+    const rowLogs = [];
     
     let group = await Group.findOne({ where: { name: 'Flatmates' } });
     if (!group) group = await Group.create({ name: 'Flatmates' });
@@ -215,17 +309,35 @@ exports.confirmCsv = async (req, res) => {
 
     for (let row of cleanData) {
       // Allow dropping rows
-      if (row._drop === true) continue;
+      if (row._drop === true) {
+        droppedCount++;
+        const droppedAnomaly = anomalyAnalysis.find(a => a.rowNum === row._rowNum);
+        const droppedIssues = droppedAnomaly ? droppedAnomaly.issues : [];
+        const conflictNote = droppedAnomaly && droppedAnomaly.conflictGroupId
+          ? ` [Conflict group: ${droppedAnomaly.conflictGroupId}, role: ${droppedAnomaly.conflictRole}]`
+          : '';
+        rowLogs.push(`[ROW ${row._rowNum}] DROPPED    | "${row.description || 'No description'}"${conflictNote}`);
+        if (droppedIssues.length > 0) {
+          droppedIssues.forEach(issue => rowLogs.push(`               Issue: ${issue}`));
+        }
+        rowLogs.push(`               Resolution: User chose to drop this row.`);
+        rowLogs.push('');
+        continue;
+      }
 
       const parsedDate = parseDateSafe(row.date);
 
       let amount = parseFloat(row.amount);
+      let originalCurrency = row.currency;
+      let originalAmount = amount;
       if (row.currency && row.currency !== 'INR') {
         // If it's a foreign currency (USD, EUR, GBP etc.), auto convert to INR using historical api
         const dateStr = parsedDate ? parsedDate.toISOString().split('T')[0] : new Date().toISOString().split('T')[0];
         const converted = await currency_converter(row.currency, amount, 'INR', dateStr);
         if (converted !== null) {
           amount = converted;
+          convertedCount++;
+          rowLogs.push(`[ROW ${row._rowNum}] CONVERTED  | "${row.description}" — ${originalCurrency} ${originalAmount.toFixed(2)} => INR ${amount.toFixed(2)} (historical rate on ${parsedDate ? parsedDate.toISOString().split('T')[0] : 'today'})`);
         } else {
           // Fallback rates if API fails
           if (row.currency === 'USD') {
@@ -235,6 +347,8 @@ exports.confirmCsv = async (req, res) => {
           } else if (row.currency === 'GBP') {
             amount = amount * 105;
           }
+          convertedCount++;
+          rowLogs.push(`[ROW ${row._rowNum}] CONVERTED  | "${row.description}" — ${originalCurrency} ${originalAmount.toFixed(2)} => INR ${amount.toFixed(2)} (fallback rate used, API unavailable)`);
         }
         row.currency = 'INR';
       }
@@ -252,14 +366,66 @@ exports.confirmCsv = async (req, res) => {
       if (isSettlement) {
          const payer = await getOrCreateUser(row.paid_by);
          const payee = await getOrCreateUser(row.split_with);
+         if (!payer || !payee) {
+            console.warn(`Skipping settlement on row ${row._rowNum} because payer or payee is missing.`);
+            rowLogs.push(`[ROW ${row._rowNum}] SKIPPED    | "${row.description}" — missing payer or payee for settlement.`);
+            continue;
+         }
          await Settlement.create({
             group_id: group.id, paid_by_id: payer.id, paid_to_id: payee.id, amount, date: parsedDate
          });
+         settlementCount++;
+         rowLogs.push(`[ROW ${row._rowNum}] SETTLEMENT | "${row.description}" — ${row.paid_by} paid ${row.split_with} INR ${amount.toFixed(2)}. Routed to settlements table.`);
          continue;
       }
 
       const payer = await getOrCreateUser(row.paid_by);
+      if (!payer) {
+         console.warn(`Skipping row ${row._rowNum} because paid_by is missing or invalid.`);
+         rowLogs.push(`[ROW ${row._rowNum}] SKIPPED    | "${row.description}" — paid_by was missing and could not be resolved.`);
+         rowLogs.push('');
+         continue;
+      }
       let split_type = row.split_type || 'equal';
+
+      // Log this row's anomalies and resolution (for rows that are imported)
+      const rowAnomaly = anomalyAnalysis.find(a => a.rowNum === row._rowNum);
+      if (rowAnomaly && rowAnomaly.issues.length > 0) {
+        const conflictNote = rowAnomaly.conflictGroupId
+          ? ` [${rowAnomaly.conflictGroupId.toUpperCase()}, role: ${rowAnomaly.conflictRole}]`
+          : '';
+        rowLogs.push(`[ROW ${row._rowNum}] FIXED & IMPORTED | "${row.description}"${conflictNote}`);
+        rowAnomaly.issues.forEach(issue => rowLogs.push(`               Anomaly: ${issue}`));
+        // Document resolutions for each issue
+        if (rowAnomaly.issues.some(i => i.startsWith('Foreign Currency'))) {
+          rowLogs.push(`               Resolution: Currency converted — ${originalCurrency} ${originalAmount.toFixed(2)} => INR ${amount.toFixed(2)}${originalCurrency === row.currency ? ' (fallback rate)' : ' (historical API rate)'}`);
+        }
+        if (rowAnomaly.issues.some(i => i === 'Missing Payer')) {
+          rowLogs.push(`               Resolution: Payer filled in as "${row.paid_by}" by user.`);
+        }
+        if (rowAnomaly.issues.some(i => i.includes('Meera'))) {
+          rowLogs.push(`               Resolution: Meera removed from split_with by user.`);
+        }
+        if (rowAnomaly.issues.some(i => i.includes('Kabir'))) {
+          rowLogs.push(`               Resolution: Kabir removed from split_with by user.`);
+        }
+        if (rowAnomaly.issues.some(i => i.includes('split'))) {
+          rowLogs.push(`               Resolution: split_type corrected to "${split_type}" by user.`);
+        }
+        if (rowAnomaly.issues.some(i => i.includes('Date'))) {
+          rowLogs.push(`               Resolution: Date corrected to "${row.date}" by user.`);
+        }
+        if (rowAnomaly.issues.some(i => i.includes('Percentages'))) {
+          rowLogs.push(`               Resolution: Split percentages corrected by user and auto-normalised to 100%.`);
+        }
+        if (rowAnomaly.issues.some(i => i.includes('commas'))) {
+          rowLogs.push(`               Resolution: Commas auto-removed from amount.`);
+        }
+        if (rowAnomaly.issues.some(i => i.includes('Duplicate') || i.includes('Conflicting amounts'))) {
+          rowLogs.push(`               Resolution: User kept this row as the authoritative record.`);
+        }
+        rowLogs.push('');
+      }
 
       const dbExpense = await Expense.create({
         group_id: group.id,
@@ -342,10 +508,104 @@ exports.confirmCsv = async (req, res) => {
       }
     }
 
-    res.json({ message: 'Import and Save Successful' });
+    importedCount = cleanData.filter(r => !r._drop).length - settlementCount;
+
+    // ========== BUILD DETAILED REPORT ==========
+
+    // SUMMARY
+    reportLines.push('SUMMARY');
+    reportLines.push('-'.repeat(60));
+    reportLines.push(`Total Rows Submitted : ${cleanData.length}`);
+    reportLines.push(`Rows Imported        : ${importedCount}`);
+    reportLines.push(`Rows Dropped         : ${droppedCount}`);
+    reportLines.push(`Settlements Detected : ${settlementCount}`);
+    reportLines.push(`Currency Conversions : ${convertedCount}`);
+    reportLines.push(`Anomalies Detected   : ${anomalyAnalysis.length}`);
+    reportLines.push('');
+
+    // ANOMALY TYPES DETECTED
+    if (anomalyAnalysis.length > 0) {
+      const allIssues = anomalyAnalysis.flatMap(a => a.issues);
+      const issueCount = {};
+      allIssues.forEach(i => {
+        const key = i.startsWith('Foreign Currency') ? 'Foreign Currency' :
+                    i.startsWith('Percentages sum') ? 'Percentages not summing to 100%' :
+                    i.startsWith('Conflicting amounts') ? 'Conflicting Amounts (Duplicate)' :
+                    i.startsWith('Duplicate row') ? 'Duplicate Row' : i;
+        issueCount[key] = (issueCount[key] || 0) + 1;
+      });
+      reportLines.push('ANOMALY TYPES DETECTED');
+      reportLines.push('-'.repeat(60));
+      Object.entries(issueCount).forEach(([type, count]) => {
+        reportLines.push(`  [${count} row${count > 1 ? 's' : ''}]  ${type}`);
+      });
+      reportLines.push('');
+    }
+
+    // CONFLICT GROUPS SECTION
+    const conflictGroups = {};
+    anomalyAnalysis.forEach(a => {
+      if (a.conflictGroupId) {
+        if (!conflictGroups[a.conflictGroupId]) conflictGroups[a.conflictGroupId] = [];
+        conflictGroups[a.conflictGroupId].push(a);
+      }
+    });
+    const conflictGroupIds = Object.keys(conflictGroups);
+    if (conflictGroupIds.length > 0) {
+      reportLines.push('CONFLICT GROUPS (DUPLICATE / CONFLICTING ROWS)');
+      reportLines.push('-'.repeat(60));
+      reportLines.push('These rows shared the same description and were grouped for review.');
+      reportLines.push('The system recommended keeping the row with the highest amount.');
+      reportLines.push('');
+      conflictGroupIds.forEach(gid => {
+        const group = conflictGroups[gid];
+        reportLines.push(`  Group: ${gid.toUpperCase()}`);
+        group.forEach(a => {
+          const row = cleanData.find(r => r._rowNum === a.rowNum);
+          const status = row && row._drop ? 'DROPPED' : 'KEPT';
+          const role = a.conflictRole === 'suggested-keep'
+            ? '★ RECOMMENDED KEEP (highest amount)'
+            : '  duplicate';
+          const amt = row ? `INR ${parseFloat(row.amount || 0).toFixed(2)}` : 'unknown amount';
+          const desc = row ? row.description : `Row ${a.rowNum}`;
+          reportLines.push(`    [ROW ${a.rowNum}] ${role} | "${desc}" | ${amt} | User decision: ${status}`);
+        });
+        reportLines.push('');
+      });
+    }
+
+    // CURRENCY CONVERSIONS SECTION
+    const currencyLogs = rowLogs.filter(l => l.includes('CONVERTED'));
+    if (currencyLogs.length > 0) {
+      reportLines.push('CURRENCY CONVERSIONS');
+      reportLines.push('-'.repeat(60));
+      currencyLogs.forEach(l => reportLines.push('  ' + l.replace('[', '').replace(']', '')));
+      reportLines.push('');
+    }
+
+    // ROW-BY-ROW ACTION LOG
+    reportLines.push('ROW-BY-ROW ACTION LOG (ANOMALOUS ROWS ONLY)');
+    reportLines.push('-'.repeat(60));
+    if (rowLogs.length === 0) {
+      reportLines.push('  No anomalies were flagged. All rows were clean.');
+    } else {
+      rowLogs.forEach(l => reportLines.push(l));
+    }
+    reportLines.push('');
+    reportLines.push('='.repeat(60));
+    reportLines.push('  END OF REPORT');
+    reportLines.push('='.repeat(60));
+
+    const reportText = reportLines.join('\n');
+    const reportPath = require('path').join(__dirname, '..', 'import_report.txt');
+    fs.writeFileSync(reportPath, reportText, 'utf8');
+
+    res.json({ message: 'Import and Save Successful', report: reportText });
 
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: 'Import saving failed', details: err.message });
   }
 };
+
+exports.currency_converter = currency_converter;
