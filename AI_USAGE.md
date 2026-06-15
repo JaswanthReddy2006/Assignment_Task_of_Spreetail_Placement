@@ -149,10 +149,36 @@ This function is called on every render, so issue tags disappear the moment the 
 
 ---
 
+### Case 7 — Grouping Duplicates by Description Only
+
+**What the AI did:**  
+The AI's initial implementation of duplicate and conflict detection grouped CSV rows solely by the lowercase, trimmed description field.
+
+```js
+// AI-generated (wrong duplicate key):
+const key = row.description.toLowerCase().trim();
+```
+
+**How I caught it:**  
+I pointed out that if "Groceries DMart" is present 4 times in the CSV but all 4 dates are different (e.g. they represent weekly shopping trips), they are separate expenses and should not be grouped or deleted as duplicates. The AI's logic was incorrectly flagging them as duplicates of the first entry and prompting the user to drop 3 of them.
+
+**What I changed:**  
+I directed the AI to modify the post-pass bucketing logic to group rows by a combination of both **normalized description and exact date** as a composite key:
+
+```js
+// Fixed duplicate/conflict grouping key:
+const normDesc = (row.description || '').toLowerCase().trim();
+const normDate = (row.date || '').trim();
+const key = `${normDesc}||${normDate}`;
+```
+This correctly allows week-by-week recurring expenses (like "Groceries DMart" on different dates) to pass as clean, separate expenses, while only grouping records that occur on the *same* date with the *same* description.
+
+---
+
 ## My Role as Engineer
 
 - Reviewed every generated file before it entered the codebase
-- Tested every feature in the browser; caught all 6 bugs documented above
+- Tested every feature in the browser; caught all 7 bugs documented above
 - Made all key product decisions (see DECISIONS.md) — the AI implemented what I specified
 - Directed the AI with precise, technical prompts; never used vague instructions like "fix this"
 - Understood the balance calculation and debt simplification algorithm well enough to trace it by hand
